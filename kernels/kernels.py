@@ -260,6 +260,68 @@ def test_partial_reduce():
         # test(a, b, c)
         # assert_allclose(ref, c, atol=0.07)
 
+def test_partial_reduce_elemwise():
+    M = tkl.sym.M
+    N = tkl.sym.N
+    BLOCK_M = tkl.sym.BLOCK_M
+    BLOCK_N = tkl.sym.BLOCK_N
+    ELEMS_PER_THREAD = tkl.sym.ELEMS_PER_THREAD
+    ADDRESS_SPACE = tkl.sym.ADDRESS_SPACE
+
+    constraints: list[tkw.Constraint] = [
+        tkw.HardwareConstraint(
+            threads_per_wave=64,
+            waves_per_block=(1, 1, 1),
+            vector_shapes={M: 1, N: BLOCK_N},
+        )
+    ]
+    constraints += [tkw.WorkgroupConstraint(M, BLOCK_M, 1)]
+    constraints += [tkw.WorkgroupConstraint(N, N, 0)]
+    constraints += [tkw.TilingConstraint(N, BLOCK_N)]
+    constraints += [tkw.WaveConstraint(M, BLOCK_M)]
+    constraints += [tkw.WaveConstraint(N, BLOCK_N)]
+
+    @tkw.wave(constraints)
+    def test(
+        a: tkl.Memory[M, N, ADDRESS_SPACE, tkl.f32],
+        c: tkl.Memory[M, ADDRESS_SPACE, tkl.f32],
+    ):
+        init_max = tkl.Register[M, tkl.f32](0)
+        @tkw.reduction(N, init_args=[init_max])
+        def repeat(
+            partial_sum: tkl.Register[M, tkl.f32],
+        ) -> tkl.Register[M, tkl.f32]:
+            lhs = tkw.read(a, elements_per_thread=ELEMS_PER_THREAD)
+            partial_sum = tkw.sum(lhs, partial_sum, dim=N)
+            return partial_sum
+        result = repeat + repeat
+        tkw.write(result, c, elements_per_thread=1)
+
+    config = {"backend": "rocm", "device": "hip", "target": "gfx942"}
+
+    shape = (256, 1024)
+    a = torch.randn(shape, dtype=torch.float32)
+    b = torch.randn(shape, dtype=torch.float32)
+    c = torch.zeros((shape[0],), dtype=torch.float32)
+    ref = torch.sum((a),dim=-1) * 2
+    with tk.gen.TestLaunchContext(
+        {
+            M: shape[0],
+            N: shape[1],
+            BLOCK_M: 1,
+            BLOCK_N: 64,
+            ELEMS_PER_THREAD: 1,
+            ADDRESS_SPACE: tkl.AddressSpace.GLOBAL_MEMORY.value,
+        },
+        canonicalize=True,
+        run=True,
+        run_config=config,
+    ):
+        # with open("partial_reduce_bm_2.mlir", "w") as f:
+        #     f.write(str(test(a, b, c).module_op))
+        test(a, c)
+        assert_allclose(ref, c, atol=0.07)
+
 def test_toy_online_softmax():
     M = tkl.sym.M
     N = tkl.sym.N
@@ -328,10 +390,10 @@ def test_toy_online_softmax():
         run=True,
         run_config=config,
     ):
-        with open("softmax_bm_2.mlir", "w") as f:
-            f.write(str(test(a, b, c).module_op))
-        # test(a, b, c)
-        # assert_allclose(ref, c, atol=0.07)
+        # with open("softmax_bm_2.mlir", "w") as f:
+        #     f.write(str(test(a, b, c).module_op))
+        test(a, b, c)
+        assert_allclose(ref, c, atol=0.07)
 
 def test_online_softmax():
     M = tkl.sym.M
@@ -478,6 +540,8 @@ def test_symbolic_range_reduce_max():
         # assert_equal(c, ref.values.numpy())
 
 if __name__ == "__main__":
-    test_toy_online_softmax()
+    # test_online_softmax()
+    # test_toy_online_softmax()
+    test_partial_reduce_elemwise()
     # test_partial_reduce()
     # test_tiled_reduce_max()
